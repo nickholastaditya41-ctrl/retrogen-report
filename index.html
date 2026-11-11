@@ -718,7 +718,10 @@ async function runOCR(r,force){
   const refresh=()=>{ const c=document.querySelector(`#rows .pt[data-id="${r.id}"]`); if(c) updateCard(c,mode,r); };
   OCR_BUSY.add(r.id); refresh();
   try{
-    const resp=await fetch(OCR_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:mode==="marka"?"marka":"reflektor",image:await ocrImage(r.foto100.src)})});
+    const ctl=new AbortController(); const tm=setTimeout(()=>ctl.abort(),60000);
+    let resp; try{ resp=await fetch(OCR_URL,{method:"POST",signal:ctl.signal,headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:mode==="marka"?"marka":"reflektor",image:await ocrImage(r.foto100.src)})}); }
+    catch(err){ if(err&&err.name==="AbortError"){ toast("Baca angka kelamaan (lebih dari 1 menit). Coba lagi atau isi manual."); return; } throw err; }
+    finally{ clearTimeout(tm); }
     const res=await resp.json().catch(()=>({ok:false,error:"Fitur baca angka belum aktif di server ini."}));
     if(!resp.ok||!res.ok){ toast(res.error?`Baca angka gagal: ${res.error}`:"Angka di foto belum kebaca. Isi manual ya."); return; }
     const vals=mode==="marka"?[res.rl,res.qd]:[res.n02,res.n05];
