@@ -56,9 +56,10 @@ module.exports = async function handler(req, res) {
   if (typeof image !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) return res.status(400).json({ ok: false, error: "Foto tidak valid." });
   if (image.length > MAX_IMAGE_CHARS) return res.status(413).json({ ok: false, error: "Foto terlalu besar." });
 
+  const t0 = Date.now();
   try {
     const r = await fetch(`${BASE}/chat/completions`, {
-      method: "POST",
+      method: "POST", signal: AbortSignal.timeout(45000),
       headers: { Authorization: `Bearer ${process.env.APMIX_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: MODEL, temperature: 0, max_tokens: 200, stream: false,
@@ -69,6 +70,7 @@ module.exports = async function handler(req, res) {
       })
     });
     const data = await r.json().catch(() => ({}));
+    console.log(`ocr mode=${mode} model=${MODEL} status=${r.status} ms=${Date.now() - t0} img=${Math.round(image.length / 1024)}KB`);
     if (!r.ok) return res.status(502).json({ ok: false, error: `APMix ${r.status}: ${String((data.error && data.error.message) || "").slice(0, 160)}` });
     let content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     if (Array.isArray(content)) content = content.map(p => (p && p.text) || "").join("");
@@ -82,6 +84,10 @@ module.exports = async function handler(req, res) {
     const c = String(j.color || "").toLowerCase().match(/red|white|yellow|blue|green|orange|brown/);
     return res.status(200).json({ ok: n02 !== null && n05 !== null, mode, n02, n05, warna: c ? COLOR[c[0]] : null, low: lowConf, model: MODEL });
   } catch (e) {
-    return res.status(502).json({ ok: false, error: "Balasan AI tidak bisa dibaca." });
+    const timeout = e && (e.name === "TimeoutError" || e.name === "AbortError");
+    console.error(`ocr gagal mode=${mode} ms=${Date.now() - t0} err=${e && e.name}: ${e && e.message}`);
+    return res.status(timeout ? 504 : 502).json({ ok: false, error: timeout ? "APMix tidak menjawab dalam 45 detik. Coba lagi." : "Balasan AI tidak bisa dibaca." });
   }
 };
+
+module.exports.config = { maxDuration: 60 };
