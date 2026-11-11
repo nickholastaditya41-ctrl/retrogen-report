@@ -1,1 +1,87 @@
+// RetroGen Report · baca angka layar alat dengan AI vision lewat APMix.
+// Env Vercel: APMIX_API_KEY (wajib), APMIX_MODEL (opsional, default claude-sonnet-4-6),
+// ALLOWED_ORIGINS (opsional, pisahkan koma; default *.vercel.app milik project ini + localhost).
 
+const BASE = process.env.APMIX_BASE_URL || "https://api.apmix.ai/v1";
+const MODEL = process.env.APMIX_MODEL || "claude-sonnet-4-6";
+const MAX_IMAGE_CHARS = 3_000_000; // ~2,2 MB base64
+
+const COLOR = { red: "Merah", white: "Putih", yellow: "Kuning", blue: "Biru", green: "Hijau", orange: "Oranye", brown: "Coklat" };
+
+const PROMPTS = {
+  reflektor: `You read the display of a handheld retroreflectometer for signs/reflectors from a field photo.
+The display shows readings stacked vertically. The FIRST (top) large number is the 0.2° observation-angle reading.
+The SECOND number below it is the 0.5° reading. Ignore any further numbers (a third reading), icons and symbols.
+The display may also show a color word such as red, white, yellow, blue, green, orange or brown.
+Copy the digits exactly as shown, including the decimal point. If a value is not clearly readable, use null.
+Reply with JSON only, no prose: {"n02": number|null, "n05": number|null, "color": string|null, "confidence": "high"|"low"}`,
+  marka: `You read the display of a road-marking retroreflectometer from a field photo.
+The display has a table with columns RL and Qd. Rows numbered 1, 2, 3... are individual readings; a row marked with x̄ (x-bar) is the mean.
+Return the FIRST individual reading only: the row numbered 1. Do NOT use the mean row, temperature, humidity, date or time.
+Copy the digits exactly as shown. If a value is not clearly readable, use null.
+Reply with JSON only, no prose: {"rl": number|null, "qd": number|null, "confidence": "high"|"low"}`
+};
+
+function allowed(req) {
+  const origin = req.headers.origin || "";
+  const list = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
+  if (list.length) return list.includes(origin);
+  const host = req.headers.host || "";
+  return !origin || origin === `https://${host}` || /^http:\/\/localhost(:\d+)?$/.test(origin);
+}
+
+function toNum(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(String(v).replace(",", "."));
+  return Number.isFinite(n) && n >= 0 && n < 10000 ? n : null;
+}
+
+function parseJson(text) {
+  const t = String(text || "").replace(/```(?:json)?/gi, "").trim();
+  const m = t.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("no json");
+  return JSON.parse(m[0]);
+}
+
+module.exports = async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Gunakan POST." });
+  if (!allowed(req)) return res.status(403).json({ ok: false, error: "Asal permintaan tidak diizinkan." });
+  if (!process.env.APMIX_API_KEY) return res.status(500).json({ ok: false, error: "APMIX_API_KEY belum diisi di Vercel." });
+
+  let body = req.body;
+  if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = {}; } }
+  const mode = body && body.mode === "marka" ? "marka" : "reflektor";
+  const image = body && body.image;
+  if (typeof image !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) return res.status(400).json({ ok: false, error: "Foto tidak valid." });
+  if (image.length > MAX_IMAGE_CHARS) return res.status(413).json({ ok: false, error: "Foto terlalu besar." });
+
+  try {
+    const r = await fetch(`${BASE}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.APMIX_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: MODEL, temperature: 0, max_tokens: 200, stream: false,
+        messages: [{ role: "user", content: [
+          { type: "text", text: PROMPTS[mode] },
+          { type: "image_url", image_url: { url: image } }
+        ] }]
+      })
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ ok: false, error: `APMix ${r.status}: ${String((data.error && data.error.message) || "").slice(0, 160)}` });
+    let content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    if (Array.isArray(content)) content = content.map(p => (p && p.text) || "").join("");
+    const j = parseJson(content);
+    const lowConf = j.confidence === "low";
+    if (mode === "marka") {
+      const rl = toNum(j.rl), qd = toNum(j.qd);
+      return res.status(200).json({ ok: rl !== null && qd !== null, mode, rl, qd, low: lowConf, model: MODEL });
+    }
+    const n02 = toNum(j.n02), n05 = toNum(j.n05);
+    const c = String(j.color || "").toLowerCase().match(/red|white|yellow|blue|green|orange|brown/);
+    return res.status(200).json({ ok: n02 !== null && n05 !== null, mode, n02, n05, warna: c ? COLOR[c[0]] : null, low: lowConf, model: MODEL });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: "Balasan AI tidak bisa dibaca." });
+  }
+};
